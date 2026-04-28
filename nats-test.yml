@@ -1,0 +1,15 @@
+go:
+  data:
+    nats:
+      uri: nats://localhost:4222
+      user: macro
+      password: MacZh20070804
+      cluster: 
+      jetstream: true
+      tls:
+        enabled: false
+        skip_verify: true
+        ca_file: /etc/nats/ca.crt
+        cert_file: /etc/nats/client.crt
+        key_file: /etc/nats/client.key
+      max_reconnect_attempts: 10
