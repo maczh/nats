@@ -2,7 +2,7 @@ package nats
 
 import (
 	"errors"
-	"math/rand"
+	"fmt"
 	"strings"
 	"time"
 
@@ -18,15 +18,15 @@ type Nats struct {
 	conf        *koanf.Koanf
 	multi       bool
 	tags        []string
-	connns      []*nats.Conn
 	connections map[string]*connection
 }
 
 type connection struct {
-	conn     *nats.Conn
+	Conn     *nats.Conn
 	uri      string
 	user     string
 	password string
+	Subs     map[string]*nats.Subscription
 }
 
 var NATS = &Nats{}
@@ -52,7 +52,7 @@ func (m *Nats) Init(configData []byte) {
 					user:     m.conf.String("go.data.nats." + tag + ".user"),
 					password: m.conf.String("go.data.nats." + tag + ".password"),
 				}
-				options := make([]nats.Option, 0)
+				options := getDefaultNatsOptions()
 				if conn.user != "" && conn.password != "" {
 					options = append(options, nats.UserInfo(conn.user, conn.password))
 				}
@@ -62,9 +62,10 @@ func (m *Nats) Init(configData []byte) {
 					logger.Error("connect Nats server failed, tag: " + tag + ", err: " + err.Error())
 					continue
 				}
-				conn.conn = c
+				conn.Conn = c
+				conn.Subs = make(map[string]*nats.Subscription)
 				m.connections[tag] = conn
-				logger.Info("connect Nats server success, tag: " + tag + ", server: " + conn.server + ", clientId: " + conn.ClientId)
+				logger.Info("connect Nats server success, tag: " + tag + ", server: " + conn.uri)
 			}
 		} else {
 			conn := &connection{
@@ -72,7 +73,7 @@ func (m *Nats) Init(configData []byte) {
 				user:     m.conf.String("go.data.nats.user"),
 				password: m.conf.String("go.data.nats.password"),
 			}
-			options := make([]nats.Option, 0)
+			options := getDefaultNatsOptions()
 			if conn.user != "" && conn.password != "" {
 				options = append(options, nats.UserInfo(conn.user, conn.password))
 			}
@@ -82,7 +83,8 @@ func (m *Nats) Init(configData []byte) {
 				logger.Error("connect Nats server failed, err: " + err.Error())
 				return
 			}
-			conn.conn = c
+			conn.Conn = c
+			conn.Subs = make(map[string]*nats.Subscription)
 			m.connections["0"] = conn
 			logger.Info("connect Nats server success, server: " + conn.uri)
 		}
@@ -103,13 +105,13 @@ func (m *Nats) Init(configData []byte) {
 // 	}
 // }
 
-func (m *Nats) GetConnection(tag ...string) (*nats.Conn, error) {
+func (m *Nats) GetConnection(tag ...string) (*connection, error) {
 	if !m.multi {
-		if m.connections["0"].conn.IsConnected() {
-			return m.connections["0"].conn, nil
+		if m.connections["0"].Conn.IsConnected() {
+			return m.connections["0"], nil
 		} else {
 			conn := m.connections["0"]
-			opts := make([]nats.Option, 0)
+			opts := getDefaultNatsOptions()
 			if conn.user != "" && conn.password != "" {
 				opts = append(opts, nats.UserInfo(conn.user, conn.password))
 			}
@@ -118,10 +120,10 @@ func (m *Nats) GetConnection(tag ...string) (*nats.Conn, error) {
 				logger.Error("reconnect Nats server failed, err: " + err.Error())
 				return nil, err
 			}
-			conn.conn = c
+			conn.Conn = c
 			m.connections["0"] = conn
 			logger.Info("reconnect Nats server success, server: " + conn.uri)
-			return conn.conn, nil
+			return conn, nil
 		}
 	}
 	if len(tag) == 0 || tag[0] == "" {
@@ -130,11 +132,11 @@ func (m *Nats) GetConnection(tag ...string) (*nats.Conn, error) {
 	if _, ok := m.connections[tag[0]]; !ok {
 		return nil, errors.New("connection not found for tag: " + tag[0])
 	}
-	if m.connections[tag[0]].conn.IsConnected() {
-		return m.connections[tag[0]].conn, nil
+	if m.connections[tag[0]].Conn.IsConnected() {
+		return m.connections[tag[0]], nil
 	} else {
 		conn := m.connections[tag[0]]
-		opts := make([]nats.Option, 0)
+		opts := getDefaultNatsOptions()
 		if conn.user != "" && conn.password != "" {
 			opts = append(opts, nats.UserInfo(conn.user, conn.password))
 		}
@@ -143,36 +145,32 @@ func (m *Nats) GetConnection(tag ...string) (*nats.Conn, error) {
 			logger.Error("reconnect Nats server failed, err: " + err.Error())
 			return nil, err
 		}
-		conn.conn = c
+		conn.Conn = c
 		m.connections[tag[0]] = conn
-		return conn.conn, nil
+		return conn, nil
 	}
 
 }
 
 func (m *Nats) Close() {
 	if !m.multi {
-		if len(m.connections["0"].Topics) > 0 {
-			topics := make([]string, 0)
-			for _, topic := range m.connections["0"].Topics {
-				topics = append(topics, topic.Topic)
+		if len(m.connections["0"].Subs) > 0 {
+			for _, topic := range m.connections["0"].Subs {
+				topic.Unsubscribe()
 			}
-			m.connections["0"].Client.Unsubscribe(topics...)
 		}
-		m.connections["0"].Client.Disconnect(0)
-		logger.Info("disconnect Nats server success, server: " + m.connections["0"].server + ", clientId: " + m.connections["0"].ClientId)
+		m.connections["0"].Conn.Close()
+		logger.Info("disconnect Nats server success, server: " + m.connections["0"].uri)
 		delete(m.connections, "0")
 	} else {
 		for tag, _ := range m.connections {
-			if len(m.connections[tag].Topics) > 0 {
-				topics := make([]string, 0)
-				for _, topic := range m.connections[tag].Topics {
-					topics = append(topics, topic.Topic)
+			if len(m.connections[tag].Subs) > 0 {
+				for _, topic := range m.connections[tag].Subs {
+					topic.Unsubscribe()
 				}
-				m.connections[tag].Client.Unsubscribe(topics...)
 			}
-			m.connections[tag].Client.Disconnect(0)
-			logger.Info("disconnect Nats server success, tag: " + tag + ", server: " + m.connections[tag].server + ", clientId: " + m.connections[tag].ClientId)
+			m.connections[tag].Conn.Close()
+			logger.Info("disconnect Nats server success, tag: " + tag + ", server: " + m.connections[tag].uri)
 			delete(m.connections, tag)
 		}
 	}
@@ -182,9 +180,9 @@ func (m *Nats) Check() error {
 	var err error
 	if m.multi {
 		for tag, conn := range m.connections {
-			if !conn.conn.IsConnected() {
+			if !conn.Conn.IsConnected() {
 				logger.Error("Nats client not connected, tag: " + tag)
-				opts := make([]nats.Option, 0)
+				opts := getDefaultNatsOptions()
 				if conn.user != "" && conn.password != "" {
 					opts = append(opts, nats.UserInfo(conn.user, conn.password))
 				}
@@ -193,19 +191,24 @@ func (m *Nats) Check() error {
 					logger.Error("reconnect Nats server failed, err: " + err.Error())
 					return err
 				}
-				conn.conn = c
+				conn.Conn = c
 				m.connections[tag] = conn
 			}
 		}
 	} else {
 		conn := m.connections["0"]
-		if !conn.Client.IsConnected() {
+		if !conn.Conn.IsConnected() {
 			logger.Error("Nats client not connected")
-			conn.Client = paho.NewClient(paho.NewClientOptions().SetCleanSession(false).SetAutoReconnect(true).Addserver(conn.server).SetClientID(conn.ClientId).SetUsername(conn.Username).SetPassword(conn.Password).SetOnConnectHandler(conn.onConnectHandler))
-			if token := conn.Client.Connect(); token.Wait() && token.Error() != nil {
-				logger.Error("reconnect Nats server failed, err: " + token.Error().Error())
-				err = token.Error()
+			opts := getDefaultNatsOptions()
+			if conn.user != "" && conn.password != "" {
+				opts = append(opts, nats.UserInfo(conn.user, conn.password))
 			}
+			c, err := nats.Connect(conn.uri, opts...)
+			if err != nil {
+				logger.Error("reconnect Nats server failed, err: " + err.Error())
+				return err
+			}
+			conn.Conn = c
 			m.connections["0"] = conn
 		}
 	}
@@ -213,16 +216,16 @@ func (m *Nats) Check() error {
 }
 
 // safeHandler 包装MessageHandler，捕获panic
-// func safeHandler(handler nats.MsgHandler) nats.MsgHandler {
-// 	return func(client *nats.Conn, msg *nats.Msg) {
-// 		defer func() {
-// 			if r := recover(); r != nil {
-// 				logger.Error("Nats message handler panic: " + msg.Topic() + ", error: " + r.(string))
-// 			}
-// 		}()
-// 		handler(msg)
-// 	}
-// }
+func safeHandler(handler nats.MsgHandler) nats.MsgHandler {
+	return func(msg *nats.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("Nats message handler panic: " + msg.Subject + ", error: " + r.(string))
+			}
+		}()
+		handler(msg)
+	}
+}
 
 func (m *Nats) Subscribe(tag, topic string, handlerFunc nats.MsgHandler) error {
 	conn, err := m.GetConnection(tag)
@@ -230,69 +233,65 @@ func (m *Nats) Subscribe(tag, topic string, handlerFunc nats.MsgHandler) error {
 		return err
 	}
 	// 使用安全包装的handler
-	subs, err := conn.Subscribe(topic, handlerFunc)
+	subs, err := conn.Conn.Subscribe(topic, safeHandler(handlerFunc))
 	if err != nil {
 		logger.Error("subscribe topic failed, topic: " + topic + ", err: " + err.Error())
 		return err
 	}
-	subs.Wait()
 	if tag == "" {
 		tag = "0"
 	}
-	m.connections[tag].Topics = append(m.connections[tag].Topics, SubTopics{Topic: topic, Qos: qos, HandlerFunc: &handlerFunc})
+	m.connections[tag].Subs[topic] = subs
 	return nil
 }
 
-func (m *Nats) SubscribeMultiple(tag string, filters map[string]byte, callback paho.MessageHandler) error {
+func (m *Nats) Publish(tag, topic string, payload []byte) error {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return err
+	}
+	if err := conn.Conn.Publish(topic, payload); err != nil {
+		logger.Error("publish topic failed, topic: " + topic + ", err: " + err.Error())
+		return err
+	}
+	return nil
+}
+
+func (m *Nats) SubscribeQueue(tag, topic, queueName string, handlerFunc nats.MsgHandler) error {
 	conn, err := m.GetConnection(tag)
 	if err != nil {
 		return err
 	}
 	// 使用安全包装的handler
-	token := conn.Client.SubscribeMultiple(filters, safeHandler(callback))
-	if token.Error() != nil {
-		logger.Error("subscribe Topics failed, err: " + token.Error().Error())
-		return token.Error()
+	subs, err := conn.Conn.QueueSubscribe(topic, queueName, safeHandler(handlerFunc))
+	if err != nil {
+		logger.Error("subscribe topic failed, topic: " + topic + ", queueName: " + queueName + ", err: " + err.Error())
+		return err
 	}
-	token.Wait()
 	if tag == "" {
 		tag = "0"
 	}
-	for topic, _ := range filters {
-		m.connections[tag].Topics = append(m.connections[tag].Topics, SubTopics{Topic: topic, Qos: filters[topic], HandlerFunc: &callback})
-	}
+	m.connections[tag].Subs[fmt.Sprintf("%s_%s", topic, queueName)] = subs
 	return nil
 }
 
-func (m *Nats) Publish(tag, topic string, qos byte, retained bool, payload interface{}) error {
-	conn, err := m.GetConnection(tag)
-	if err != nil {
-		return err
-	}
-	if token := conn.Client.Publish(topic, qos, retained, payload); token.Wait() && token.Error() != nil {
-		logger.Error("publish topic failed, topic: " + topic + ", err: " + token.Error().Error())
-		return token.Error()
-	}
-	return nil
-}
 func (m *Nats) UnSubscribe(tag string, topics ...string) error {
 	conn, err := m.GetConnection(tag)
 	if err != nil {
 		return err
 	}
-	if token := conn.Client.Unsubscribe(topics...); token.Wait() && token.Error() != nil {
-		logger.Error("unsubscribe Topics failed, err: " + token.Error().Error())
-		return token.Error()
+	for _, topic := range topics {
+		conn.Subs[topic].Unsubscribe()
+		delete(conn.Subs, topic)
 	}
+	m.connections[tag] = conn
 	return nil
 }
 
-func generateRandHexString(sl int) string {
-	source := []byte("0123456789abcdef")
-	result := []byte{}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i := 0; i < sl; i++ {
-		result = append(result, source[r.Intn(len(source))])
+func getDefaultNatsOptions() []nats.Option {
+	return []nats.Option{
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(100),
+		nats.ReconnectWait(time.Second),
 	}
-	return string(result)
 }
