@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sadlil/gologger"
 )
 
@@ -272,6 +274,212 @@ func (m *Nats) SubscribeQueue(tag, topic, queueName string, handlerFunc nats.Msg
 		tag = "0"
 	}
 	m.connections[tag].Subs[fmt.Sprintf("%s_%s", topic, queueName)] = subs
+	return nil
+}
+
+func (m *Nats) CreateStream(tag, streamName string, subjects []string) (*jetstream.Stream, error) {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return nil, err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return nil, err
+	}
+	stream, err := js.CreateStream(context.Background(), jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: subjects,
+		Storage:  jetstream.FileStorage,
+	})
+	if err != nil {
+		logger.Error("create stream failed, err: " + err.Error())
+		return nil, err
+	}
+	return &stream, nil
+}
+
+func (m *Nats) GetStream(tag, streamName string) (*jetstream.Stream, error) {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return nil, err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return nil, err
+	}
+	stream, err := js.Stream(context.Background(), streamName)
+	if err != nil {
+		logger.Error("get stream failed, err: " + err.Error())
+		return nil, err
+	}
+	return &stream, nil
+}
+
+func (m *Nats) DeleteStream(tag, streamName string) error {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return err
+	}
+	err = js.DeleteStream(context.Background(), streamName)
+	if err != nil {
+		logger.Error("delete stream failed, err: " + err.Error())
+		return err
+	}
+	return nil
+}
+
+func (m *Nats) PublishStream(tag, streamName string, data []byte, subject string) (*jetstream.PubAck, error) {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return nil, err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return nil, err
+	}
+	var pubAck *jetstream.PubAck
+	if subject != "" {
+		pubAck, err = js.Publish(context.Background(), subject, data)
+	} else {
+		pubAck, err = js.Publish(context.Background(), streamName, data)
+	}
+	if err != nil {
+		logger.Error("publish message to jetstream failed, err: " + err.Error())
+		return nil, err
+	}
+	return pubAck, nil
+}
+
+func (m *Nats) SubscribeStream(tag, streamName, consumerName string, handlerFunc jetstream.MessageHandler) error {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return err
+	}
+	var cons jetstream.Consumer
+	if consumerName != "" {
+		cons, err = js.Consumer(context.Background(), streamName, consumerName)
+		if err != nil {
+			// 如果消费者不存在，则创建它
+			cons, err = js.CreateConsumer(context.Background(), streamName, jetstream.ConsumerConfig{
+				Durable:           consumerName,
+				DeliverPolicy:     jetstream.DeliverAllPolicy,
+				FilterSubject:     streamName,
+				InactiveThreshold: time.Hour,
+			})
+			if err != nil {
+				logger.Error("create consumer failed, err: " + err.Error())
+				return err
+			}
+		}
+	} else {
+		// 创建临时消费者
+		cons, err = js.CreateConsumer(context.Background(), streamName, jetstream.ConsumerConfig{
+			DeliverPolicy:     jetstream.DeliverAllPolicy,
+			FilterSubject:     streamName,
+			InactiveThreshold: time.Hour,
+		})
+		if err != nil {
+			logger.Error("create temporary consumer failed, err: " + err.Error())
+			return err
+		}
+	}
+
+	// 使用安全包装的handler
+	safeHandler := func(msg jetstream.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("JetStream message handler panic: " + msg.Subject() + ", error: " + fmt.Sprintf("%v", r))
+			}
+		}()
+		handlerFunc(msg)
+	}
+
+	_, err = cons.Consume(safeHandler)
+	if err != nil {
+		logger.Error("subscribe stream failed, err: " + err.Error())
+		return err
+	}
+
+	// 将订阅保存到连接中以便后续管理
+	if tag == "" {
+		tag = "0"
+	}
+	// subjectKey := fmt.Sprintf("js_%s_%s", streamName, consumerName)
+	// conn.Subs[subjectKey] = sub
+
+	return nil
+}
+
+func (m *Nats) CreateOrUpdateConsumer(tag, streamName, consumerName string, cfg *jetstream.ConsumerConfig) (*jetstream.Consumer, error) {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return nil, err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return nil, err
+	}
+
+	consumer, err := js.CreateOrUpdateConsumer(context.Background(), streamName, *cfg)
+	if err != nil {
+		logger.Error("create or update consumer failed, err: " + err.Error())
+		return nil, err
+	}
+
+	return &consumer, nil
+}
+
+func (m *Nats) GetConsumer(tag, streamName, consumerName string) (jetstream.Consumer, error) {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return nil, err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return nil, err
+	}
+
+	consumer, err := js.Consumer(context.Background(), streamName, consumerName)
+	if err != nil {
+		logger.Error("get consumer failed, err: " + err.Error())
+		return nil, err
+	}
+
+	return consumer, nil
+}
+
+func (m *Nats) DeleteConsumer(tag, streamName, consumerName string) error {
+	conn, err := m.GetConnection(tag)
+	if err != nil {
+		return err
+	}
+	js, err := jetstream.New(conn.Conn)
+	if err != nil {
+		logger.Error("create jetstream failed, err: " + err.Error())
+		return err
+	}
+
+	err = js.DeleteConsumer(context.Background(), streamName, consumerName)
+	if err != nil {
+		logger.Error("delete consumer failed, err: " + err.Error())
+		return err
+	}
+
 	return nil
 }
 
