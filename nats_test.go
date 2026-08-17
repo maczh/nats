@@ -12,9 +12,12 @@ func TestNats(t *testing.T) {
 	str := `go:
   data:
     nats:
-      uri: nats://192.168.2.20:4222
-      user: macro
-      password: MacZh20070804
+      uri: nats://127.0.0.1:4222
+      #user: macro
+      #password: MacZh20070804
+      #token: amloYWkhMjAyNg==
+      #nkeys_seed: SUADZ3IDJGWTPBU36LV3PA2DGZSYYYUDJTEPAW2QDN4NECW4CFHTIMAKJQ
+      jwt_creds: /home/macro/macro.creds
 `
 	NATS.Init([]byte(str))
 	conn, err := NATS.GetConnection()

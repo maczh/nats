@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,17 +26,22 @@ type Nats struct {
 }
 
 type connection struct {
-	Conn     *nats.Conn
-	uri      string
-	user     string
-	password string
-	Subs     map[string]*nats.Subscription
+	Conn      *nats.Conn
+	uri       string
+	user      string
+	password  string
+	token     string
+	nkeysSeed string
+	nkeyfile  string
+	jwtCreds  string
+	Subs      map[string]*nats.Subscription
 }
 
 var NATS = &Nats{}
 var logger = gologger.GetLogger()
 
 func (m *Nats) Init(configData []byte) {
+	path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	m.configData = configData
 	m.conf = koanf.New(".")
 	if err := m.conf.Load(rawbytes.Provider(m.configData), yaml.Parser()); err != nil {
@@ -50,13 +57,29 @@ func (m *Nats) Init(configData []byte) {
 			m.tags = tags
 			for _, tag := range tags {
 				conn := &connection{
-					uri:      m.conf.String("go.data.nats." + tag + ".uri"),
-					user:     m.conf.String("go.data.nats." + tag + ".user"),
-					password: m.conf.String("go.data.nats." + tag + ".password"),
+					uri:       m.conf.String("go.data.nats." + tag + ".uri"),
+					user:      m.conf.String("go.data.nats." + tag + ".user"),
+					password:  m.conf.String("go.data.nats." + tag + ".password"),
+					token:     m.conf.String("go.data.nats." + tag + ".token"),
+					nkeysSeed: m.conf.String("go.data.nats." + tag + ".nkeys_seed"),
+					jwtCreds:  filepath.Join(path, m.conf.String("go.data.nats."+tag+".jwt_creds")),
 				}
 				options := getDefaultNatsOptions()
 				if conn.user != "" && conn.password != "" {
 					options = append(options, nats.UserInfo(conn.user, conn.password))
+				} else if conn.token != "" {
+					options = append(options, nats.Token(conn.token))
+				} else if conn.nkeysSeed != "" {
+					if conn.nkeyfile == "" {
+						path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+						nkeyfile := filepath.Join(path, "nats_nkey.uk")
+						os.WriteFile(nkeyfile, []byte(conn.nkeysSeed), 0644)
+						conn.nkeyfile = nkeyfile
+					}
+					opt, _ := nats.NkeyOptionFromSeed(conn.nkeyfile)
+					options = append(options, opt)
+				} else if conn.jwtCreds != "" {
+					options = append(options, nats.UserCredentials(conn.jwtCreds))
 				}
 
 				c, err := nats.Connect(conn.uri, options...)
@@ -71,13 +94,29 @@ func (m *Nats) Init(configData []byte) {
 			}
 		} else {
 			conn := &connection{
-				uri:      m.conf.String("go.data.nats.uri"),
-				user:     m.conf.String("go.data.nats.user"),
-				password: m.conf.String("go.data.nats.password"),
+				uri:       m.conf.String("go.data.nats.uri"),
+				user:      m.conf.String("go.data.nats.user"),
+				password:  m.conf.String("go.data.nats.password"),
+				token:     m.conf.String("go.data.nats.token"),
+				nkeysSeed: m.conf.String("go.data.nats.nkeys_seed"),
+				jwtCreds:  filepath.Join(path, m.conf.String("go.data.nats.jwt_creds")),
 			}
 			options := getDefaultNatsOptions()
 			if conn.user != "" && conn.password != "" {
 				options = append(options, nats.UserInfo(conn.user, conn.password))
+			} else if conn.token != "" {
+				options = append(options, nats.Token(conn.token))
+			} else if conn.nkeysSeed != "" {
+				if conn.nkeyfile == "" {
+					path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+					nkeyfile := filepath.Join(path, "nats_nkey.uk")
+					os.WriteFile(nkeyfile, []byte(conn.nkeysSeed), 0644)
+					conn.nkeyfile = nkeyfile
+				}
+				opt, _ := nats.NkeyOptionFromSeed(conn.nkeyfile)
+				options = append(options, opt)
+			} else if conn.jwtCreds != "" {
+				options = append(options, nats.UserCredentials(conn.jwtCreds))
 			}
 
 			c, err := nats.Connect(conn.uri, options...)
@@ -116,7 +155,21 @@ func (m *Nats) GetConnection(tag ...string) (*connection, error) {
 			opts := getDefaultNatsOptions()
 			if conn.user != "" && conn.password != "" {
 				opts = append(opts, nats.UserInfo(conn.user, conn.password))
+			} else if conn.token != "" {
+				opts = append(opts, nats.Token(conn.token))
+			} else if conn.nkeysSeed != "" {
+				if conn.nkeyfile == "" {
+					path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+					nkeyfile := filepath.Join(path, "nats_nkey.uk")
+					os.WriteFile(nkeyfile, []byte(conn.nkeysSeed), 0644)
+					conn.nkeyfile = nkeyfile
+				}
+				opt, _ := nats.NkeyOptionFromSeed(conn.nkeyfile)
+				opts = append(opts, opt)
+			} else if conn.jwtCreds != "" {
+				opts = append(opts, nats.UserCredentials(conn.jwtCreds))
 			}
+
 			c, err := nats.Connect(conn.uri, opts...)
 			if err != nil {
 				logger.Error("reconnect Nats server failed, err: " + err.Error())
@@ -141,7 +194,21 @@ func (m *Nats) GetConnection(tag ...string) (*connection, error) {
 		opts := getDefaultNatsOptions()
 		if conn.user != "" && conn.password != "" {
 			opts = append(opts, nats.UserInfo(conn.user, conn.password))
+		} else if conn.token != "" {
+			opts = append(opts, nats.Token(conn.token))
+		} else if conn.nkeysSeed != "" {
+			if conn.nkeyfile == "" {
+				path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+				nkeyfile := filepath.Join(path, "nats_nkey.uk")
+				os.WriteFile(nkeyfile, []byte(conn.nkeysSeed), 0644)
+				conn.nkeyfile = nkeyfile
+			}
+			opt, _ := nats.NkeyOptionFromSeed(conn.nkeyfile)
+			opts = append(opts, opt)
+		} else if conn.jwtCreds != "" {
+			opts = append(opts, nats.UserCredentials(conn.jwtCreds))
 		}
+
 		c, err := nats.Connect(conn.uri, opts...)
 		if err != nil {
 			logger.Error("reconnect Nats server failed, err: " + err.Error())
@@ -187,7 +254,21 @@ func (m *Nats) Check() error {
 				opts := getDefaultNatsOptions()
 				if conn.user != "" && conn.password != "" {
 					opts = append(opts, nats.UserInfo(conn.user, conn.password))
+				} else if conn.token != "" {
+					opts = append(opts, nats.Token(conn.token))
+				} else if conn.nkeysSeed != "" {
+					if conn.nkeyfile == "" {
+						path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+						nkeyfile := filepath.Join(path, "nats_nkey.uk")
+						os.WriteFile(nkeyfile, []byte(conn.nkeysSeed), 0644)
+						conn.nkeyfile = nkeyfile
+					}
+					opt, _ := nats.NkeyOptionFromSeed(conn.nkeyfile)
+					opts = append(opts, opt)
+				} else if conn.jwtCreds != "" {
+					opts = append(opts, nats.UserCredentials(conn.jwtCreds))
 				}
+
 				c, err := nats.Connect(conn.uri, opts...)
 				if err != nil {
 					logger.Error("reconnect Nats server failed, err: " + err.Error())
@@ -204,7 +285,21 @@ func (m *Nats) Check() error {
 			opts := getDefaultNatsOptions()
 			if conn.user != "" && conn.password != "" {
 				opts = append(opts, nats.UserInfo(conn.user, conn.password))
+			} else if conn.token != "" {
+				opts = append(opts, nats.Token(conn.token))
+			} else if conn.nkeysSeed != "" {
+				if conn.nkeyfile == "" {
+					path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+					nkeyfile := filepath.Join(path, "nats_nkey.uk")
+					os.WriteFile(nkeyfile, []byte(conn.nkeysSeed), 0644)
+					conn.nkeyfile = nkeyfile
+				}
+				opt, _ := nats.NkeyOptionFromSeed(conn.nkeyfile)
+				opts = append(opts, opt)
+			} else if conn.jwtCreds != "" {
+				opts = append(opts, nats.UserCredentials(conn.jwtCreds))
 			}
+
 			c, err := nats.Connect(conn.uri, opts...)
 			if err != nil {
 				logger.Error("reconnect Nats server failed, err: " + err.Error())

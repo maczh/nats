@@ -2,5 +2,8 @@ go:
   data:
     nats:
       uri: nats://localhost:4222
-      user: macro
-      password: MacZh20070804
+      #user: macro
+      #password: MacZh20070804
+      #token: amloYWkhMjAyNg==
+      nkeys_seed: SUADZ3IDJGWTPBU36LV3PA2DGZSYYYUDJTEPAW2QDN4NECW4CFHTIMAKJQ
+      jwt_creds: macro.creds
